@@ -61,6 +61,11 @@ h1{font-weight:600;font-size:22px;margin:0;letter-spacing:-.01em}
 .card input{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--fg);font:inherit}
 .card .d{font-size:14px;line-height:1.55;margin:12px 0;max-height:150px;overflow:auto}
 #mstat{min-height:1.3em;font-size:13px;color:var(--mut);margin:6px 0}
+#viewer{will-change:transform,opacity}
+.rbar,.rfoot{transition:opacity .25s}
+#reader.min .rbar,#reader.min .rfoot{opacity:0;pointer-events:none}
+@media(hover:none){.nav{display:none}}
+.ghost{position:fixed;z-index:30;border-radius:3px;box-shadow:0 10px 36px rgba(0,0,0,.35);background-size:cover;background-position:center;display:flex;align-items:center;justify-content:center;padding:12px;color:#fff;font-weight:600;text-align:center;overflow:hidden;pointer-events:none}
 #toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--acc);color:var(--on);padding:9px 16px;border-radius:8px;font-size:14px;display:none;z-index:60;max-width:90vw}
 </style>
 </head>
@@ -143,9 +148,9 @@ function render(){
   for(let i=0;i<sorted.length;i+=per){
     const s=document.createElement('div');s.className='shelf';
     sorted.slice(i,i+per).forEach(b=>{
-      const d=document.createElement('div');d.className='book';
+      const d=document.createElement('div');d.className='book';d.dataset.id=b.id;
       const c=document.createElement('button');c.className='cover';c.style.cssText='width:100%;border:0;'+(b.cover?`background-image:url(${b.cover})`:`background-color:${COLORS[b.added%COLORS.length]}`);
-      if(!b.cover)c.textContent=b.title;c.setAttribute('aria-label','Open '+b.title);c.onclick=()=>openBook(b.id);
+      if(!b.cover)c.textContent=b.title;c.setAttribute('aria-label','Open '+b.title);c.onclick=()=>openBook(b.id,c);
       const bar=document.createElement('div');bar.className='bar';bar.innerHTML=`<i style="width:${Math.round((b.pct||0)*100)}%"></i>`;
       const m=document.createElement('div');m.className='meta';m.textContent=b.title+(b.author?' – '+b.author:'');
       const x=document.createElement('button');x.className='del';x.textContent='×';x.setAttribute('aria-label','Remove '+b.title);
@@ -165,7 +170,7 @@ async function importFiles(list,opts={}){
       if(typeof ePub==='undefined'||typeof JSZip==='undefined')throw new Error('the reader library did not load. Check your internet connection and reload');
       const buf=await f.arrayBuffer();
       let zip;try{zip=await JSZip.loadAsync(buf.slice(0))}catch(e){throw new Error('this is not a valid zip/EPUB file')}
-      if(!zip.file('META-INF/container.xml'))throw new Error('it has no EPUB structure (it may be a different format or DRM-protected)');
+      if(!Object.keys(zip.files).some(n=>/^meta-inf\/container\.xml$/i.test(n)))throw new Error('it has no EPUB structure (it may be a different format or DRM-protected)');
       const bk=ePub(buf.slice(0));let md={},cover=null;
       try{await Promise.race([bk.opened,new Promise((_,j)=>setTimeout(()=>j(new Error('timeout')),15000))]);md=await bk.loaded.metadata||{}}catch(e){console.warn('metadata unreadable',e)}
       try{const u=await bk.coverUrl();if(u){const blob=await (await fetch(u)).blob();const du=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(blob)});cover=await shrink(du)}}catch(e){}
@@ -243,10 +248,28 @@ function applyTheme(){
   document.querySelectorAll('#themes button').forEach(b=>b.classList.toggle('sel',b.dataset.t===settings.theme));
   if(rend){rend.themes.override('color',t.fg);rend.themes.override('background',t.bg);rend.themes.fontSize(settings.size+'%')}
 }
-async function openBook(id){
+const reduced=matchMedia('(prefers-reduced-motion:reduce)').matches;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const EASE='cubic-bezier(.2,.8,.2,1)';
+const px=r=>({left:r.left+'px',top:r.top+'px',width:r.width+'px',height:r.height+'px'});
+const fullRect=()=>({left:0,top:0,width:innerWidth,height:innerHeight});
+function ghostFor(b,r){const g=document.createElement('div');g.className='ghost';Object.assign(g.style,px(r));
+  g.style.backgroundImage=b.cover?`url(${b.cover})`:'none';if(!b.cover){g.style.backgroundColor=COLORS[b.added%COLORS.length];g.textContent=b.title}
+  document.body.append(g);return g}
+async function openBook(id,srcEl){
   cur=books.find(b=>b.id===id);if(!cur)return;
   const f=await dbp('files','readonly',s=>s.get(id));if(!f){toast('The book file is missing. Please add it again.');return}
   cur.opened=Date.now();await dbp('meta','readwrite',s=>s.put(cur));
+  let g=null,done=Promise.resolve();
+  srcEl=srcEl||document.querySelector(`[data-id="${id}"] .cover`);
+  if(!reduced){
+    let r=srcEl?srcEl.getBoundingClientRect():null;
+    if(!r||r.bottom<0||r.top>innerHeight)r={left:innerWidth/2-70,top:innerHeight/2-105,width:140,height:210};
+    g=ghostFor(cur,r);
+    done=g.animate([{...px(r),borderRadius:'3px'},{...px(fullRect()),borderRadius:'0px'}],{duration:460,easing:EASE,fill:'forwards'}).finished;
+    $('reader').animate([{opacity:0},{opacity:0,offset:.5},{opacity:1}],{duration:460});
+  }
+  $('reader').classList.remove('min');$('viewer').style.transform='';$('viewer').style.opacity='';busy=false;
   $('reader').classList.add('on');$('rtitle').textContent=cur.title;
   ['toc','set'].forEach(p=>$(p).classList.remove('on'));
   $('viewer').innerHTML='';
@@ -260,28 +283,73 @@ async function openBook(id){
     else cur.pct=loc.start.percentage||cur.pct;
     showProgress(loc);dbp('meta','readwrite',s=>s.put(cur)).catch(()=>{});
   });
-  const keys=e=>{if(e.key==='ArrowRight'||e.key==='PageDown')rend.next();else if(e.key==='ArrowLeft'||e.key==='PageUp')rend.prev();else if(e.key==='Escape')closeBook()};
+  const keys=e=>{if(e.key==='ArrowRight'||e.key==='PageDown'||e.key===' ')turn(1);else if(e.key==='ArrowLeft'||e.key==='PageUp')turn(-1);else if(e.key==='Escape')closeBook()};
   rend.on('keyup',keys);document.onkeyup=e=>{if($('reader').classList.contains('on'))keys(e)};
-  let sx=0;rend.on('touchstart',e=>{sx=e.changedTouches[0].screenX});
-  rend.on('touchend',e=>{const d=e.changedTouches[0].screenX-sx;if(Math.abs(d)>50)d<0?rend.next():rend.prev()});
-  await rend.display(cur.cfi||undefined);
-  book.loaded.navigation.then(nav=>{
+  let tx=0,ty=0,dx=0,drag=false,moved=0;const V=$('viewer');
+  rend.on('mousedown',()=>{moved=0});
+  rend.on('touchstart',e=>{const t=e.changedTouches[0];tx=t.screenX;ty=t.screenY;dx=0;moved=0;drag=!busy});
+  rend.on('touchmove',e=>{if(!drag)return;const t=e.changedTouches[0];dx=t.screenX-tx;const dy=t.screenY-ty;moved=Math.max(moved,Math.abs(dx),Math.abs(dy));
+    if(Math.abs(dx)>10&&Math.abs(dx)>Math.abs(dy)){V.style.transition='none';V.style.transform=`translateX(${dx*.6}px)`;V.style.opacity=String(1-Math.min(.5,Math.abs(dx)/500))}});
+  rend.on('touchend',()=>{if(!drag)return;drag=false;
+    if(Math.abs(dx)>70)turn(dx<0?1:-1,dx*.6);
+    else{V.style.transition='transform .2s ease-out,opacity .2s';V.style.transform='';V.style.opacity='1'}});
+  rend.on('click',e=>{
+    if(moved>8||busy)return;
+    if(e.target&&e.target.closest&&e.target.closest('a'))return;
+    try{const sel=e.view.getSelection();if(sel&&String(sel))return}catch(_){}
+    const x=(e.screenX-window.screenX)/window.innerWidth;
+    if(x<.25)turn(-1);else if(x>.75)turn(1);else $('reader').classList.toggle('min');
+  });
+  const tmo=ms=>new Promise((_,j)=>setTimeout(()=>j(new Error('the book took too long to open')),ms));
+  try{
+    try{await Promise.race([rend.display(cur.cfi||undefined),tmo(20000)])}
+    catch(e){if(!cur.cfi)throw e;cur.cfi=null;await Promise.race([rend.display(),tmo(20000)])} // saved spot invalid: start from the beginning
+  }catch(e){
+    console.error(e);if(g)g.remove();toast('Couldn\'t open this book: '+(e.message||'unknown error'));await closeBook();return;
+  }
+  if(g){await done;await g.animate([{opacity:1},{opacity:0}],{duration:180}).finished;g.remove()}
+  const bk0=book,rd0=rend;if(!bk0||!rd0)return; // closed while opening
+  bk0.loaded.navigation.then(nav=>{
     const l=$('tocl');l.innerHTML='';
     (function walk(items,d){items.forEach(it=>{const a=document.createElement('a');a.textContent=it.label.trim();a.style.paddingLeft=(6+d*14)+'px';
-      a.onclick=()=>{rend.display(it.href);$('toc').classList.remove('on')};l.append(a);if(it.subitems)walk(it.subitems,d+1)})})(nav.toc,0)});
-  book.ready.then(()=>book.locations.generate(1400)).then(()=>{const l=rend.currentLocation();if(l&&l.start)showProgress(l);}).catch(()=>{});
+      a.onclick=()=>{rd0.display(it.href);$('toc').classList.remove('on')};l.append(a);if(it.subitems)walk(it.subitems,d+1)})})(nav.toc,0)});
+  bk0.ready.then(()=>bk0.locations.generate(1400)).then(()=>{if(rend!==rd0)return;const l=rd0.currentLocation();if(l&&l.start)showProgress(l);}).catch(()=>{});
 }
 function showProgress(loc){
   const p=Math.round((cur.pct||0)*100);$('pct').textContent=p+'%';$('fill').style.width=p+'%';
   const d=loc.start.displayed;$('loc').textContent=d?`Page ${d.page} of ${d.total}`:'';
 }
+let busy=false;
+async function turn(dir,dx=0){
+  if(!rend||busy)return;busy=true;$('reader').classList.add('min');
+  const v=$('viewer'),go=()=>dir>0?rend.next():rend.prev();
+  try{
+    if(reduced){await go();return}
+    const out=-dir*Math.max(60,Math.abs(dx)+30);
+    v.style.transition='transform .15s ease-in,opacity .15s ease-in';v.style.transform=`translateX(${out}px)`;v.style.opacity='0';
+    await sleep(150);await go();
+    v.style.transition='none';v.style.transform=`translateX(${-out}px)`;void v.offsetWidth;
+    v.style.transition='transform .3s '+EASE+',opacity .2s ease-out';v.style.transform='';v.style.opacity='1';
+    await sleep(300);
+  }finally{busy=false;v.style.transition=''}
+}
+addEventListener('mousemove',e=>{const r=$('reader');if(r.classList.contains('on')&&r.classList.contains('min')&&e.clientY<56)r.classList.remove('min')});
 async function closeBook(){
-  $('reader').classList.remove('on');document.onkeyup=null;
+  const b=cur,r=$('reader');document.onkeyup=null;
+  let g=null;
+  if(b&&!reduced&&r.classList.contains('on')){g=ghostFor(b,fullRect());g.style.opacity='0';await g.animate([{opacity:0},{opacity:1}],{duration:140,fill:'forwards'}).finished}
+  r.classList.remove('on');
   if(rend){try{rend.destroy()}catch(e){}}if(book){try{book.destroy()}catch(e){}}
   rend=book=null;render();
+  if(g){
+    const el=document.querySelector(`[data-id="${b.id}"] .cover`);
+    if(el){el.scrollIntoView({block:'nearest'});const rc=el.getBoundingClientRect();el.style.visibility='hidden';
+      await g.animate([{...px(fullRect()),borderRadius:'0px',opacity:1},{...px(rc),borderRadius:'3px',opacity:1}],{duration:400,easing:EASE,fill:'forwards'}).finished;el.style.visibility=''}
+    g.remove();
+  }
 }
 $('back').onclick=closeBook;
-$('prev').onclick=()=>rend&&rend.prev();$('next').onclick=()=>rend&&rend.next();
+$('prev').onclick=()=>turn(-1);$('next').onclick=()=>turn(1);
 $('tocb').onclick=()=>{$('set').classList.remove('on');$('toc').classList.toggle('on')};
 $('setb').onclick=()=>{$('toc').classList.remove('on');$('set').classList.toggle('on')};
 $('fm').onclick=()=>{settings.size=Math.max(70,settings.size-10);saveSettings();applyTheme()};
