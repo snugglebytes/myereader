@@ -158,20 +158,25 @@ function render(){
 
 async function shrink(url){return new Promise(res=>{const im=new Image();im.onload=()=>{const w=260,h=Math.round(im.height*w/im.width);const cv=document.createElement('canvas');cv.width=w;cv.height=h;cv.getContext('2d').drawImage(im,0,0,w,h);res(cv.toDataURL('image/jpeg',.82))};im.onerror=()=>res(null);im.src=url})}
 
-async function importFiles(list){
+async function importFiles(list,opts={}){
   for(const f of list){
     if(!/\.epub$/i.test(f.name)){toast(f.name+' isn\'t an .epub file');continue}
     try{
-      const buf=await f.arrayBuffer();const bk=ePub(buf.slice(0));await bk.ready;const md=await bk.loaded.metadata;
-      let cover=null;try{const u=await bk.coverUrl();if(u){const blob=await (await fetch(u)).blob();const du=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(blob)});cover=await shrink(du)}}catch(e){}
+      if(typeof ePub==='undefined'||typeof JSZip==='undefined')throw new Error('the reader library did not load. Check your internet connection and reload');
+      const buf=await f.arrayBuffer();
+      let zip;try{zip=await JSZip.loadAsync(buf.slice(0))}catch(e){throw new Error('this is not a valid zip/EPUB file')}
+      if(!zip.file('META-INF/container.xml'))throw new Error('it has no EPUB structure (it may be a different format or DRM-protected)');
+      const bk=ePub(buf.slice(0));let md={},cover=null;
+      try{await Promise.race([bk.opened,new Promise((_,j)=>setTimeout(()=>j(new Error('timeout')),15000))]);md=await bk.loaded.metadata||{}}catch(e){console.warn('metadata unreadable',e)}
+      try{const u=await bk.coverUrl();if(u){const blob=await (await fetch(u)).blob();const du=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(blob)});cover=await shrink(du)}}catch(e){}
       const isbn=((md.identifier||'').replace(/[-\s]/g,'').match(/97[89]\d{10}|\d{9}[\dXx]/)||[''])[0];
       const strip=h=>(h||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
       const rec={id:(crypto.randomUUID?crypto.randomUUID():Date.now()+''+Math.random()),title:md.title||f.name.replace(/\.epub$/i,''),author:md.creator||'',cover,description:strip(md.description),publisher:md.publisher||'',year:(md.pubdate||'').slice(0,4),subjects:'',isbn,added:Date.now(),cfi:null,pct:0,opened:0};
       bk.destroy();
-      if(!rec.cover||!rec.author||!rec.description){toast('Looking up "'+rec.title.slice(0,30)+'" online…');await lookup(rec,false)}
+      if(!opts.noLookup&&(!rec.cover||!rec.author||!rec.description)){toast('Looking up "'+rec.title.slice(0,30)+'" online…');await lookup(rec,false)}
       await dbp('files','readwrite',s=>s.put({id:rec.id,data:buf}));await dbp('meta','readwrite',s=>s.put(rec));
       books.push(rec);render();toast('Added: '+rec.title);
-    }catch(e){console.error(e);toast('Couldn\'t read '+f.name+'. Is the file damaged?')}
+    }catch(e){console.error(e);toast('Couldn\'t add '+f.name+': '+(e.message||'unknown error'))}
   }
 }
 $('file').onchange=e=>{importFiles([...e.target.files]);e.target.value=''};
@@ -284,12 +289,38 @@ $('fp').onclick=()=>{settings.size=Math.min(220,settings.size+10);saveSettings()
 document.querySelectorAll('#themes button').forEach(b=>b.onclick=()=>{settings.theme=b.dataset.t;saveSettings();applyTheme()});
 addEventListener('resize',()=>{if(rend)try{rend.resize()}catch(e){};if(!$('reader').classList.contains('on'))render()});
 
+/* ---- sample book (built in the browser; delete it with the × on its cover) ---- */
+async function buildSample(){
+  const P=(...t)=>t.map(x=>'<p>'+x+'</p>').join('');
+  const ch=[
+   ['Welcome',P('This is a sample book, added so you can try the reader. Delete it whenever you like: hover over its cover in the library (or look for the small buttons on a touch screen) and press the × in the corner.','Everything here is stored in your browser. Nothing is uploaded anywhere, and your books stay on this device.','Turn the page with the arrow keys, the arrows at the edges of the screen, or by swiping on a touch screen.')],
+   ['Turning pages',P('Press the right arrow or Page Down to go forward, and the left arrow or Page Up to go back. Escape returns you to the library.','The bar at the bottom shows how far through the book you are. The percentage appears a moment after a book opens, once the reader has measured its length.','Open Contents to jump between chapters, and Aa to change the text size or switch between Paper, Sepia and Night.','Try making the text larger. The pages reflow to fit, and the reader keeps your place.')],
+   ['Your place is saved',P('Every time the page changes, your position is saved automatically. Close the tab, shut the browser, come back next week: the book opens on the page you left.','The Continue button at the top of the library jumps straight into whatever you read most recently. The thin line under each cover shows your progress in that book.','Reading position is stored per book, so you can read several at once without losing track of any of them.')],
+   ['Adding and removing books',P('Use Add books to pick one or more .epub files, or drag them onto the page. The title, author and cover are read from the file itself.','If a file has no cover or author, the library can look them up online. Press the i on any book to see its details, fix the title or author, and press Find online to search again.','To remove a book, press the × on its cover and confirm. That deletes the file and your saved position from this browser. When you are ready, remove this sample the same way, and happy reading.')]
+  ];
+  const X='<?xml version="1.0" encoding="utf-8"?>';
+  const z=new JSZip();
+  z.file('mimetype','application/epub+zip',{compression:'STORE'});
+  z.file('META-INF/container.xml',X+'<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
+  ch.forEach((c,i)=>z.file('OEBPS/c'+i+'.xhtml',X+'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>'+c[0]+'</title></head><body><h1>'+c[0]+'</h1>'+c[1]+'</body></html>'));
+  z.file('OEBPS/nav.xhtml',X+'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol>'+ch.map((c,i)=>'<li><a href="c'+i+'.xhtml">'+c[0]+'</a></li>').join('')+'</ol></nav></body></html>');
+  z.file('OEBPS/content.opf',X+'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">sample-guide-1</dc:identifier><dc:title>A Short Guide to Your Library</dc:title><dc:creator>Library</dc:creator><dc:language>en</dc:language><dc:description>A sample book showing how the reader works. Safe to delete.</dc:description><meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>'+ch.map((c,i)=>'<item id="c'+i+'" href="c'+i+'.xhtml" media-type="application/xhtml+xml"/>').join('')+'</manifest><spine>'+ch.map((c,i)=>'<itemref idref="c'+i+'"/>').join('')+'</spine></package>');
+  return new File([await z.generateAsync({type:'blob',mimeType:'application/epub+zip'})],'sample-guide.epub');
+}
+async function seedSample(){
+  let done=false;try{done=!!localStorage.getItem('nook-seeded')}catch(e){}
+  if(done||books.length)return;
+  try{localStorage.setItem('nook-seeded','1')}catch(e){}
+  try{await importFiles([await buildSample()],{noLookup:true})}catch(e){console.error(e)}
+}
+
 /* ---- start ---- */
 (async()=>{
   applyTheme();
   try{db=await openDB();books=await dbp('meta','readonly',s=>s.getAll())||[]}
   catch(e){toast('This browser is blocking saved storage, so books won\'t be kept between visits.')}
   render();
+  if(db)await seedSample();
 })();
 </script>
 </body>
