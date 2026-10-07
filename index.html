@@ -71,6 +71,11 @@ main .ver{max-width:1100px;margin:0 auto;padding:0 6vw 40px;color:var(--mut);fon
 .veil{position:fixed;inset:0;z-index:15;background:var(--bg);pointer-events:none}
 .row.wrap{flex-wrap:wrap}.row.wrap button{flex:1 1 44%}
 .pctb{font-size:12px;color:var(--mut);padding:2px 6px;border-radius:6px}.pctb:hover{background:rgba(128,128,128,.14)}
+#reader .seek{flex:1;position:relative;height:22px;cursor:pointer;touch-action:none;margin:0 6px}
+.seek .line{position:absolute;left:0;right:0;top:50%;height:2px;margin-top:-1px;background:rgba(128,128,128,.3);border-radius:1px;overflow:hidden}
+.seek .line i{display:block;height:100%;width:0;background:var(--acc)}
+#thumb{position:absolute;top:50%;left:0;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:var(--acc);transition:transform .15s;pointer-events:none}
+.seek:hover #thumb,.seek.drag #thumb{transform:scale(1.4)}
 #toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--acc);color:var(--on);padding:9px 16px;border-radius:8px;font-size:14px;display:none;z-index:60;max-width:90vw}
 </style>
 </head>
@@ -111,7 +116,7 @@ main .ver{max-width:1100px;margin:0 auto;padding:0 6vw 40px;color:var(--mut);fon
       <div class="row" id="prog"><button data-p="pages">Pages</button><button data-p="percent">Percent</button></div>
     </div>
   </div>
-  <div class="rfoot"><span id="loc">—</span><div class="bar"><i id="fill" style="width:0"></i></div><button id="pct" class="pctb" title="Switch between pages and percentage">0%</button></div>
+  <div class="rfoot"><span id="loc">—</span><div class="seek" id="seek"><span class="line"><i id="fill"></i></span><b id="thumb"></b></div><button id="pct" class="pctb" title="Switch between pages and percentage">0%</button></div>
 </section>
 <div id="modal" role="dialog" aria-label="Book details"><div class="card">
   <div class="cover" id="mc"></div>
@@ -355,11 +360,11 @@ async function openBook(id,srcEl){
     if(l&&l.start){const pc=bk0.locations.percentageFromCfi(l.start.cfi);if(pc!=null)cur.pct=pc;showProgress(l)}
   }).catch(()=>{});
 }
-let lastLoc=null;
+let lastLoc=null,scrub=false;
 function showProgress(loc){
-  loc=loc||lastLoc;if(!loc||!cur)return;lastLoc=loc;
+  loc=loc||lastLoc;if(!loc||!cur)return;lastLoc=loc;if(scrub)return;
   const L=book&&book.locations,ready=L&&L.length();
-  const p=Math.round((cur.pct||0)*100);$('fill').style.width=p+'%';$('loc').textContent='';
+  const p=Math.round((cur.pct||0)*100);$('fill').style.width=p+'%';$('thumb').style.left=p+'%';$('loc').textContent='';
   let t=p+'%';
   if(settings.progress==='pages'){
     if(ready){const i=L.locationFromCfi(loc.start.cfi);t='Page '+Math.min(L.length(),(i<0?0:i)+1)+' of '+L.length()}
@@ -380,7 +385,7 @@ async function turn(dir,dx=0){
     await sleep(300);
   }finally{busy=false;v.style.transition=''}
 }
-addEventListener('mousemove',e=>{const r=$('reader');if(r.classList.contains('on')&&r.classList.contains('min')&&e.clientY<56)r.classList.remove('min')});
+addEventListener('mousemove',e=>{const r=$('reader');if(r.classList.contains('on')&&r.classList.contains('min')&&(e.clientY<56||e.clientY>innerHeight-56))r.classList.remove('min')});
 async function closeBook(){
   const b=cur,r=$('reader');document.onkeyup=null;
   let g=null,veil=null;
@@ -422,7 +427,7 @@ function applyFontTo(doc){
   let st=doc.getElementById('nook-font');if(!st){st=doc.createElement('style');st.id='nook-font';doc.head.appendChild(st)}
   if(F.link&&!doc.getElementById('nook-fl-'+F.k)){const l=doc.createElement('link');l.id='nook-fl-'+F.k;l.rel='stylesheet';l.href=F.link;doc.head.appendChild(l)}
   let css=F.f?`html body,html body *{font-family:${F.f} !important}`:'';
-  try{if((doc.body.innerText||'').trim().length<40&&doc.querySelector('img,svg'))css+=' body{text-align:center}img,svg{display:block;margin:0 auto;max-width:100%;max-height:90vh;height:auto}'}catch(e){} // image-only pages (covers) sit centered
+  try{if((doc.body.innerText||'').trim().length<40&&doc.querySelector('img,svg'))css+=' body{text-align:center}img,svg{display:block;margin:0 auto;max-width:100%;height:86vh !important;width:auto !important;object-fit:contain}';doc.querySelectorAll('svg').forEach(v=>v.setAttribute('preserveAspectRatio','xMidYMid meet'))}catch(e){} // image-only pages (covers) sit centered
   st.textContent=css;
 }
 function markUI(){
@@ -437,6 +442,32 @@ FONTS.forEach(F=>{const b=document.createElement('button');b.dataset.k=F.k;b.tex
 document.querySelectorAll('#prog button').forEach(b=>b.onclick=()=>{settings.progress=b.dataset.p;saveSettings();markUI();showProgress()});
 $('pct').onclick=()=>{settings.progress=settings.progress==='pages'?'percent':'pages';saveSettings();markUI();showProgress()};
 markUI();
+
+/* ---- drag the progress circle to jump anywhere in the book ---- */
+(function(){
+  const seek=$('seek');let sp=0;
+  const frac=e=>{const r=seek.getBoundingClientRect();return Math.min(1,Math.max(0,(e.clientX-r.left)/r.width))};
+  const ready=()=>book&&book.locations&&book.locations.length();
+  function preview(p){
+    $('fill').style.width=p*100+'%';$('thumb').style.left=p*100+'%';
+    const n=ready();let t=Math.round(p*100)+'%';
+    if(settings.progress==='pages'&&n)t='Page '+Math.min(n,Math.floor(p*n)+1)+' of '+n;
+    $('pct').textContent=t;
+  }
+  seek.onpointerdown=e=>{
+    if(!rend||busy)return;
+    if(!ready()){toast('Still counting pages. Try again in a moment.');return}
+    scrub=true;seek.setPointerCapture(e.pointerId);seek.classList.add('drag');sp=frac(e);preview(sp);
+  };
+  seek.onpointermove=e=>{if(scrub){sp=frac(e);preview(sp)}};
+  const end=async()=>{
+    if(!scrub)return;scrub=false;seek.classList.remove('drag');
+    if(!rend||!ready())return;busy=true;
+    try{await rend.display(book.locations.cfiFromPercentage(Math.min(sp,.9995)))}catch(e){}
+    busy=false;showProgress();
+  };
+  seek.onpointerup=end;seek.onpointercancel=end;
+})();
 
 /* ---- sample book (built in the browser; delete it with the × on its cover) ---- */
 async function buildSample(){
