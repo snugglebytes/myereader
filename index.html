@@ -128,6 +128,10 @@ body.hasmini #shelves{padding-bottom:120px}
 #mini .mtx{display:flex;flex-direction:column;min-width:0}
 #mini .mt{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #mini .ms{font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pvol{display:flex;align-items:center;gap:8px;width:min(300px,100%);margin:2px 0 14px;color:var(--mut)}
+.pvol input{flex:1;min-width:0;accent-color:var(--acc);cursor:pointer;height:28px}
+.pvol #pvolv{width:3.2em;text-align:right;font-size:12px;font-variant-numeric:tabular-nums}
+.pvol .pb{color:var(--fg)}
 </style>
 </head>
 <body>
@@ -201,6 +205,7 @@ body.hasmini #shelves{padding-bottom:120px}
       <button class="pb" id="pp30" aria-label="Forward 30 seconds"></button>
       <button class="pb" id="pnext" aria-label="Next chapter"></button>
     </div>
+    <div class="pvol"><button class="pb sm" id="pmute" aria-label="Mute"></button><input type="range" id="pvol" min="0" max="1" step="0.01" aria-label="Volume"><span id="pvolv">100%</span></div>
     <div class="pextra"><button class="chip" id="pspeed" aria-label="Playback speed">1×</button><button class="chip" id="psleep" aria-label="Sleep timer">Sleep timer</button></div>
   </div></div>
   <div class="panel" id="pchaps"><h3>Chapters</h3><div id="pchl"></div></div>
@@ -766,7 +771,7 @@ function loadAudio(rec,blobs){
   if(ab){persist();aud.pause()}
   ab=rec;abBlobs=blobs;if(!ab.durs||ab.durs.length!==blobs.length)ab.durs=blobs.map((_,i)=>(ab.durs&&ab.durs[i])||0);
   recalc();pausedAt=1;setSleep(0);
-  fillPlayer();setSpeed(ab.speed||1,true);
+  fillPlayer();setSpeed(ab.speed||1,true);applyVol();
   setTrack(ab.track||0,ab.pos||0,false);
 }
 async function openAudio(id){
@@ -794,7 +799,7 @@ function buildChapters(){
     a.onclick=()=>{gotoChapter(i);$('pchaps').classList.remove('on')};l.append(a)});
   lastChapKey='';
 }
-function showPlayer(){$('player').classList.add('on');miniShow();lastChapKey='';ui()}
+function showPlayer(){$('player').classList.add('on');miniShow();setPlayIcon();lastChapKey='';ui()}
 function hidePlayer(){$('pchaps').classList.remove('on');$('player').classList.remove('on');persist();render();miniShow()}
 function unloadAudio(save=true){
   if(!ab)return;if(save)persist();
@@ -828,7 +833,7 @@ function setSpeed(v,quiet){ab.speed=v;aud.defaultPlaybackRate=v;aud.playbackRate
 function cycleSpeed(){let i=SPEEDS.findIndex(s=>s>=(ab.speed||1)-0.001);setSpeed(SPEEDS[(i+1)%SPEEDS.length])}
 function fadeOut(){
   if(fading||aud.paused)return;fading=true;let v=aud.volume;
-  const iv=setInterval(()=>{v-=.12;if(v<=0.02||aud.paused){clearInterval(iv);aud.pause();aud.volume=1;fading=false;setSleep(0)}else aud.volume=v},250);
+  const iv=setInterval(()=>{v-=.12;if(v<=0.02||aud.paused){clearInterval(iv);aud.pause();aud.volume=curVol();fading=false;setSleep(0)}else aud.volume=v},250);
 }
 function setSleep(i){
   sleepI=i;clearTimeout(sleepTimer);sleepEnd=0;sleepChap=-1;const v=SLEEPS[i];
@@ -909,6 +914,18 @@ aud.addEventListener('error',()=>{if(!ab)return;loading=false;toast('Couldn\'t p
 addEventListener('pagehide',persist);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)persist()});
 
+/* volume (remembered across books; note iPhones/iPads ignore it and use the hardware buttons) */
+const VI=p=>'<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/>'+p+'</svg>';
+const VOLI={hi:VI('<path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>'),lo:VI('<path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>'),mute:VI('<line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>')};
+const curVol=()=>settings.volume==null?1:settings.volume;
+let lastVol=curVol()>0?curVol():0.8;
+function applyVol(){const v=curVol();aud.volume=v;$('pvol').value=v;$('pvolv').textContent=Math.round(v*100)+'%';
+  $('pmute').innerHTML=v===0?VOLI.mute:v<.5?VOLI.lo:VOLI.hi;$('pmute').setAttribute('aria-label',v===0?'Unmute':'Mute')}
+function setVol(v){v=Math.round(Math.min(1,Math.max(0,v))*100)/100;if(v>0)lastVol=v;settings.volume=v;saveSettings();applyVol()}
+$('pvol').oninput=e=>setVol(+e.target.value);
+$('pmute').onclick=()=>setVol(curVol()===0?lastVol:0);
+applyVol();
+
 /* wiring */
 $('pplay').onclick=toggle;$('mplay').onclick=toggle;
 $('pm15').onclick=()=>skip(-15);$('pp30').onclick=()=>skip(30);
@@ -922,10 +939,13 @@ $('mstop').onclick=()=>unloadAudio(true);
 document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>{libFilter=b.dataset.f;render()});
 addEventListener('keydown',e=>{
   if(!$('player').classList.contains('on')||e.metaKey||e.ctrlKey||e.altKey)return;
+  if(e.target.tagName==='INPUT')return;
   const inBtn=e.target.closest&&e.target.closest('button');
   if(e.key===' '&&!inBtn){e.preventDefault();toggle()}
   else if(e.key==='ArrowLeft'){e.preventDefault();skip(-15)}
   else if(e.key==='ArrowRight'){e.preventDefault();skip(30)}
+  else if(e.key==='ArrowUp'){e.preventDefault();setVol(curVol()+.05)}
+  else if(e.key==='ArrowDown'){e.preventDefault();setVol(curVol()-.05)}
   else if(e.key==='Escape'){if($('pchaps').classList.contains('on'))$('pchaps').classList.remove('on');else hidePlayer()}
 });
 (function(){ // drag the seek bar within the current chapter
